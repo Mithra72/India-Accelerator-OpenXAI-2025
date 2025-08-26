@@ -1,150 +1,124 @@
-'use client'
+"use client";
 
-import { useState, useRef } from 'react'
-import { Mic, Square, Play, Pause } from 'lucide-react'
+import { useRef, useState } from "react";
+
+type Status = "idle" | "recording" | "uploading" | "done" | "error";
 
 export default function VoiceRecorder() {
-  const [isRecording, setIsRecording] = useState(false)
-  const [isPlaying, setIsPlaying] = useState(false)
-  const [audioURL, setAudioURL] = useState<string | null>(null)
-  const [recordingTime, setRecordingTime] = useState(0)
-  
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
-  const audioRef = useRef<HTMLAudioElement | null>(null)
-  const timerRef = useRef<NodeJS.Timeout | null>(null)
+  const [status, setStatus] = useState<Status>("idle");
+  const [audioURL, setAudioURL] = useState<string | null>(null);
+  const [transcript, setTranscript] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const mediaRecorder = useRef<MediaRecorder | null>(null);
+  const audioChunks = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
 
   const startRecording = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const mediaRecorder = new MediaRecorder(stream)
-      mediaRecorderRef.current = mediaRecorder
+      setTranscript(null);
+      setError(null);
+      setAudioURL(null);
 
-      const chunks: BlobPart[] = []
-      mediaRecorder.ondataavailable = (event) => {
-        chunks.push(event.data)
-      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
 
-      mediaRecorder.onstop = () => {
-        const blob = new Blob(chunks, { type: 'audio/wav' })
-        const url = URL.createObjectURL(blob)
-        setAudioURL(url)
-        stream.getTracks().forEach(track => track.stop())
-      }
+      const mr = new MediaRecorder(stream, { mimeType: "audio/webm" });
+      mediaRecorder.current = mr;
+      audioChunks.current = [];
 
-      mediaRecorder.start()
-      setIsRecording(true)
-      setRecordingTime(0)
-      
-      timerRef.current = setInterval(() => {
-        setRecordingTime(prev => prev + 1)
-      }, 1000)
-    } catch (error) {
-      console.error('Error accessing microphone:', error)
+      mr.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) audioChunks.current.push(e.data);
+      };
+
+      mr.onstop = async () => {
+        // stop tracks so mic light turns off
+        stream.getTracks().forEach((t) => t.stop());
+
+        const blob = new Blob(audioChunks.current, { type: "audio/webm" });
+        const url = URL.createObjectURL(blob);
+        setAudioURL(url);
+
+        setStatus("uploading");
+        try {
+          const fd = new FormData();
+          fd.append("file", blob, "recording.webm");
+
+          const res = await fetch("/api/transcribe", { method: "POST", body: fd });
+          if (!res.ok) throw new Error(`Server error: ${res.status}`);
+          const data = (await res.json()) as { text?: string; error?: string };
+
+          if (data.error) throw new Error(data.error);
+          setTranscript(data.text ?? "No transcription available.");
+          setStatus("done");
+        } catch (e: any) {
+          setError(e?.message || "Upload failed.");
+          setStatus("error");
+        }
+      };
+
+      mr.start();
+      setStatus("recording");
+    } catch (e: any) {
+      setError(e?.message || "Microphone permission denied.");
+      setStatus("error");
     }
-  }
+  };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop()
-      setIsRecording(false)
-      if (timerRef.current) {
-        clearInterval(timerRef.current)
-      }
+    if (mediaRecorder.current && mediaRecorder.current.state !== "inactive") {
+      mediaRecorder.current.stop();
+    } else if (streamRef.current) {
+      // safety: stop tracks if recorder failed to start
+      streamRef.current.getTracks().forEach((t) => t.stop());
     }
-  }
+  };
 
-  const playAudio = () => {
-    if (audioRef.current) {
-      audioRef.current.play()
-      setIsPlaying(true)
-    }
-  }
-
-  const pauseAudio = () => {
-    if (audioRef.current) {
-      audioRef.current.pause()
-      setIsPlaying(false)
-    }
-  }
-
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return `${mins}:${secs.toString().padStart(2, '0')}`
-  }
+  const busy = status === "recording" || status === "uploading";
 
   return (
-    <div className="space-y-6">
-      {/* Recording Controls */}
-      <div className="flex justify-center space-x-4">
-        {!isRecording ? (
-          <button
-            onClick={startRecording}
-            className="flex items-center space-x-2 bg-red-500 hover:bg-red-600 text-white px-6 py-3 rounded-full transition-colors"
-          >
-            <Mic size={20} />
-            <span>Start Recording</span>
-          </button>
-        ) : (
-          <button
-            onClick={stopRecording}
-            className="flex items-center space-x-2 bg-gray-500 hover:bg-gray-600 text-white px-6 py-3 rounded-full transition-colors"
-          >
-            <Square size={20} />
-            <span>Stop Recording</span>
-          </button>
-        )}
+     <div className="flex flex-col gap-4">
+      <div className="flex items-center gap-3">
+        <button
+          onClick={status === "recording" ? stopRecording : startRecording}
+          className={`rounded-xl px-5 py-3 font-semibold text-white shadow transition
+            ${status === "recording" ? "bg-red-600 hover:bg-red-700" : "bg-indigo-600 hover:bg-indigo-700"}`}
+          aria-label={status === "recording" ? "Stop recording" : "Start recording"}
+        >
+          {status === "recording" ? "Stop Recording" : "Start Recording"}
+        </button>
+
+        <span className="text-sm text-gray-600">
+          Status:{" "}
+          <strong className="capitalize">
+            {status.replace("-", " ")}
+          </strong>
+        </span>
       </div>
 
-      {/* Recording Timer */}
-      {isRecording && (
-        <div className="text-center">
-          <div className="text-2xl font-mono text-white">
-            {formatTime(recordingTime)}
-          </div>
-          <div className="flex justify-center mt-2">
-            <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
-          </div>
+      {audioURL && (
+        <div className="rounded-xl border border-gray-200 p-4">
+          <p className="mb-2 text-sm font-medium text-gray-700">Preview</p>
+          <audio src={audioURL} controls className="w-full" />
         </div>
       )}
 
-      {/* Audio Playback */}
-      {audioURL && (
-        <div className="space-y-4">
-          <audio
-            ref={audioRef}
-            src={audioURL}
-            onEnded={() => setIsPlaying(false)}
-            className="hidden"
-          />
-          
-          <div className="flex justify-center space-x-4">
-            {!isPlaying ? (
-              <button
-                onClick={playAudio}
-                className="flex items-center space-x-2 bg-green-500 hover:bg-green-600 text-white px-6 py-3 rounded-full transition-colors"
-              >
-                <Play size={20} />
-                <span>Play Recording</span>
-              </button>
-            ) : (
-              <button
-                onClick={pauseAudio}
-                className="flex items-center space-x-2 bg-orange-500 hover:bg-orange-600 text-white px-6 py-3 rounded-full transition-colors"
-              >
-                <Pause size={20} />
-                <span>Pause</span>
-              </button>
-            )}
-          </div>
+      {busy && (
+        <div className="text-sm text-gray-600">Processing… this may take a moment.</div>
+      )}
 
-          <div className="bg-black/20 rounded-lg p-4">
-            <p className="text-white text-sm text-center opacity-80">
-              Recording saved! You can play it back or record a new one.
-            </p>
-          </div>
+      {transcript && (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+          <p className="mb-1 text-sm font-semibold text-emerald-900">Transcript</p>
+          <p className="whitespace-pre-wrap text-emerald-950">{transcript}</p>
+        </div>
+      )}
+
+      {error && (
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-red-700">
+          {error}
         </div>
       )}
     </div>
-  )
-} 
+  );
+}
